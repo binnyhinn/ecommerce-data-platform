@@ -1,126 +1,249 @@
-# Document Q&A Bot (RAG)
+# Real-Time E-Commerce Data Platform
 
-A command-line bot that answers natural-language questions about a small collection of documents. It retrieves the most relevant passages from a local vector database and asks an LLM to answer **only** from those passages, always citing the source file and page. If the answer isn't in the documents, it says so instead of guessing.
+![Python](https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white)
+![Kafka](https://img.shields.io/badge/Apache%20Kafka-3.8-231F20?logo=apachekafka&logoColor=white)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?logo=postgresql&logoColor=white)
+![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)
+![Streamlit](https://img.shields.io/badge/Streamlit-dashboard-FF4B4B?logo=streamlit&logoColor=white)
+![Tests](https://img.shields.io/badge/tests-7%20passed-brightgreen)
 
-> Built for the Bookxpert AI Intern technical assignment. Python 3.11+.
+A streaming data pipeline that turns raw online-store events into live business metrics. A Python producer sends page views, add-to-cart clicks and orders to Apache Kafka. A consumer validates each event and stores it in PostgreSQL. A Streamlit dashboard shows total events, orders, revenue, revenue per minute and top products, refreshing every 5 seconds.
+
+Python 3.11+.
+
+![Dashboard](docs/dashboard.png)
+
+## The problem this solves
+
+An online store produces thousands of small events every minute. Teams that rely on nightly batch reports find out about a sales drop, a broken checkout or a trending product hours too late. Bad or duplicate events also quietly corrupt revenue numbers.
+
+This project shows how to fix that with a streaming pipeline that:
+
+- ingests events continuously instead of waiting for a nightly load
+- validates every event before it reaches the database
+- never double-counts an event, even if it is delivered twice
+- keeps a raw layer for auditing and a transformed layer for fast reporting
+- shows live metrics as soon as the data arrives
 
 ## Tech stack
 
 | Purpose | Tool | Version |
 |---|---|---|
-| PDF loading | pypdf | 5.1.0 |
-| DOCX loading (bonus) | python-docx | 1.1.2 |
-| Chunking | langchain-text-splitters (RecursiveCharacterTextSplitter) | 0.3.2 |
-| Embeddings | sentence-transformers, model `all-MiniLM-L6-v2` | 3.3.1 |
-| Vector database | ChromaDB (persistent) | 0.5.23 |
-| LLM | Google Gemini via `google-genai` (model set by `LLM_MODEL`, default `gemini-2.5-flash`) | latest |
+| Event streaming | Apache Kafka (Docker image apache/kafka) | 3.8.0 |
+| Kafka client | confluent-kafka | 2.5.3 |
+| Database | PostgreSQL (Docker image) | 16 |
+| Database driver | psycopg2-binary | 2.9.9 |
+| Dashboard | streamlit | 1.39.0 |
+| Data handling | pandas | 2.2.3 |
+| Testing | pytest | 8.3.3 |
 | Config / secrets | python-dotenv | 1.0.1 |
-
-<!-- TODO: run `pip freeze | grep -i -E "pypdf|docx|langchain|sentence|chromadb|genai|dotenv"` and make sure the versions above match what you actually installed. -->
+| Infrastructure | Docker Compose | - |
 
 ## Architecture
 
-The project is split into two separate steps, as required:
+The project is split into three independent steps: producing, consuming and showing.
 
-```
-INDEXING (python ingest.py) - run once
-  data/*.pdf|txt|docx
-     -> load text page by page
-     -> clean (strip page numbers, repeated headers/footers)
-     -> chunk (800 chars, 150 overlap)
-     -> batch-embed all chunks (all-MiniLM-L6-v2)
-     -> store vectors + text + metadata in ChromaDB (chroma_db/ on disk)
+~~~
+PRODUCING (python -m src.producer)
+  random event (page_view 70% | add_to_cart 20% | order 10%)
+     -> JSON with event_id, event_type, user_id, product_id, timestamp
+        (orders also carry quantity and amount)
+     -> sent to Kafka topic "ecommerce-events"
 
-QUERYING (python query.py) - run as often as you like, no re-indexing
-  user question
-     -> embed the question (same model)
-     -> cosine-similarity search in ChromaDB -> top-k chunks
-     -> similarity guard: weak match? -> "not found" (LLM never called)
-     -> prompt = strict instructions + numbered chunks + question
-     -> Gemini generates answer with [filename, page X] citations
-     -> print answer + the exact source chunks used
-```
+CONSUMING (python -m src.consumer)
+  Kafka message
+     -> parse JSON (bad JSON? log a warning and skip)
+     -> validate required fields, event type, quantity, amount
+     -> insert into raw_events (duplicate event_id? ignored)
+     -> if it is an order and not a duplicate:
+          insert into orders
+          upsert revenue_per_minute (order_count + 1, revenue + amount)
+     -> commit the Kafka offset
 
-**Files**
+SHOWING (python -m streamlit run src/dashboard.py)
+  every 5 seconds:
+     -> query PostgreSQL
+     -> total events, total orders, total revenue
+     -> revenue per minute chart (last 30 minutes with data, UTC)
+     -> top products by revenue
+     -> events by type
+~~~
 
-- `config.py` - all settings in one place (chunk size, top-k, model names, paths)
-- `ingest.py` - indexing step
-- `query.py` - querying step and interactive loop
-- `data/` - the knowledge-base documents
-- `chroma_db/` - the persisted vector store (created by `ingest.py`, git-ignored)
+Kafka and PostgreSQL run in Docker Compose. The producer, consumer and dashboard run as Python processes.
 
-## Chunking strategy
+## Files
 
-I used **recursive character splitting: 800 characters per chunk with 150 characters of overlap**, splitting on paragraph breaks first, then lines, then sentences, then words.
+- `src/producer.py` - generates events and sends them to Kafka
+- `src/consumer.py` - reads from Kafka, validates, writes to PostgreSQL
+- `src/validation.py` - event validation rules
+- `src/dashboard.py` - Streamlit live dashboard
+- `src/config.py` - all settings in one place, read from environment variables
+- `sql/init.sql` - table definitions, run automatically on first container start
+- `tests/test_validation.py` - 7 unit tests for the validation rules
+- `docker-compose.yml` - Kafka and PostgreSQL
+- `docs/dashboard.png` - dashboard screenshot
+- `logs/` - log files written by the producer and consumer (git-ignored)
 
-- *Why recursive/paragraph-aware:* it keeps paragraphs and sentences intact where possible, so each chunk is a coherent idea. Blind fixed-size cuts often slice sentences in half.
-- *Why 800 characters:* small enough that each chunk is focused (better retrieval precision), large enough to carry meaning on its own.
-- *Why 150 overlap:* if an answer sits on a chunk boundary, the overlap means the context isn't lost.
-- Chunking is done **per page**, so every chunk keeps an accurate page number. Metadata stored per chunk: source filename + page (PDF) or section (TXT/DOCX).
+## Data model
 
-## Embedding model and vector database
+| Table | Purpose |
+|---|---|
+| raw_events | Every valid event as received, with the full JSON payload (audit layer) |
+| orders | One row per order: user, product, quantity, amount, timestamp |
+| revenue_per_minute | Order count and revenue per minute, updated as orders arrive |
 
-- **Embedding model: `all-MiniLM-L6-v2`.** It runs locally (no API cost or rate limits), is small and fast on a laptop CPU, and gives good quality for English semantic search. Embeddings are normalized and computed in **batches** (`batch_size=64`), never one chunk at a time.
-- **Vector DB: ChromaDB.** It persists to disk with almost no setup, stores metadata next to each vector (needed for citations), and supports cosine similarity out of the box. FAISS would be faster at large scale but needs extra code to store metadata, which wasn't worth it for a few documents.
-- **LLM: Gemini.** Free tier and a simple API. It is called with temperature 0 and a system prompt that forbids outside knowledge.
+## Design decisions
 
-## How the bot avoids hallucinating
-
-1. The prompt tells the model to answer only from the supplied excerpts and to reply with a fixed "not found" sentence otherwise.
-2. A similarity threshold (`MIN_SIMILARITY`, default 0.25) stops the pipeline before the LLM is even called when nothing relevant is retrieved.
-3. Temperature is 0 so answers stay deterministic and close to the text.
+- **Two data layers.** raw_events keeps everything for auditing and reprocessing. orders and revenue_per_minute are shaped for fast queries. The dashboard never has to scan raw JSON.
+- **Idempotent writes.** raw_events has a unique event_id and inserts use ON CONFLICT DO NOTHING. Orders and revenue are only updated when the raw insert is new, so a duplicate event can never double-count revenue.
+- **At-least-once delivery.** Kafka auto-commit is turned off. The consumer commits an offset after it has handled the message, so a crash cannot silently skip events that were not processed.
+- **Revenue aggregated in the database.** An upsert adds each order to its minute row, so the dashboard reads a small pre-aggregated table.
+- **Timestamps in UTC.** Times on the dashboard are UTC to avoid timezone bugs.
+- **One topic, keyed by user.** Events are keyed by user_id, so a user's events stay in order if the topic is later split into partitions.
+- **PostgreSQL on host port 5433,** so it does not clash with another local database on 5432.
 
 ## Setup
 
-```bash
-git clone <YOUR_REPO_URL>
-cd <repo-folder>
+~~~
+git clone https://github.com/binnyhinn/ecommerce-data-platform.git
+cd ecommerce-data-platform
 
-python -m venv .venv
-source .venv/bin/activate        # Windows: .venv\Scripts\activate
+python -m venv venv
+.\venv\Scripts\Activate.ps1        # Mac/Linux: source venv/bin/activate
 pip install -r requirements.txt
 
-cp .env.example .env             # Windows: copy .env.example .env
-# open .env and paste your Gemini API key
+# create a .env file (see Environment variables below), then:
+docker compose up -d               # start Kafka and PostgreSQL
 
-python ingest.py                 # step 1: build the index (first run downloads the embedding model)
-python query.py                  # step 2: start asking questions
-```
+# create the Kafka topic (first time only)
+docker exec kafka /opt/kafka/bin/kafka-topics.sh --create --topic ecommerce-events --bootstrap-server localhost:9092 --partitions 1 --replication-factor 1
+~~~
 
-Optional: `python query.py --k 6` (retrieve 6 chunks) or `python query.py --ask "your question"` (one-off).
+Run each of these in its own terminal (activate the venv in each):
+
+~~~
+python -m src.producer                       # step 1: generate events
+python -m src.consumer                       # step 2: read, validate, store
+python -m streamlit run src/dashboard.py     # step 3: live dashboard
+~~~
+
+The dashboard opens at http://localhost:8501
+
+Run the tests:
+
+~~~
+python -m pytest -v
+~~~
 
 ## Environment variables
 
+Create a `.env` file in the project root. It is in `.gitignore`, so it is never committed. The values below are for a local demo database only.
+
+~~~
+POSTGRES_USER=ecom
+POSTGRES_PASSWORD=ecom123
+POSTGRES_DB=ecommerce
+~~~
+
 | Variable | Required | Description |
 |---|---|---|
-| `GEMINI_API_KEY` | Yes | Free key from https://aistudio.google.com. Put it in `.env`. **Never commit `.env`** (it is in `.gitignore`). |
-| `LLM_MODEL` | No | Gemini model name. Default `gemini-2.5-flash`. |
-| `TOP_K` | No | Chunks retrieved per question. Default 4. |
-| `MIN_SIMILARITY` | No | Below this score the bot answers "not found". Default 0.25. |
+| POSTGRES_USER | Yes | PostgreSQL user, also used by Docker Compose. |
+| POSTGRES_PASSWORD | Yes | PostgreSQL password, also used by Docker Compose. |
+| POSTGRES_DB | Yes | Database name. |
+| POSTGRES_HOST | No | Default localhost. |
+| POSTGRES_PORT | No | Default 5433. |
+| KAFKA_BOOTSTRAP | No | Kafka address. Default localhost:9092. |
+| KAFKA_TOPIC | No | Topic name. Default ecommerce-events. |
 
-## Documents in the knowledge base
+## Simulated data
 
-<!-- TODO: fill in after you choose your files, e.g.
-1. `data/xyz.pdf` - what it is, ~N pages
-2. ...
--->
+| Event type | Share of events |
+|---|---|
+| page_view | 70% |
+| add_to_cart | 20% |
+| order | 10% |
+
+The generator simulates 500 users and 5 products. Orders are for 1 to 3 units.
+
+In one test run the producer sent 2,840 events. At one point the dashboard showed 966 events, 92 orders and 116,016.00 in revenue.
+
+## Environment variables
+
+Create a `.env` file in the project root. It is in `.gitignore`, so it is never committed. The values below are for a local demo database only.
+
+~~~
+POSTGRES_USER=ecom
+POSTGRES_PASSWORD=ecom123
+POSTGRES_DB=ecommerce
+~~~
+
+| Variable | Required | Description |
+|---|---|---|
+| POSTGRES_USER | Yes | PostgreSQL user, also used by Docker Compose. |
+| POSTGRES_PASSWORD | Yes | PostgreSQL password, also used by Docker Compose. |
+| POSTGRES_DB | Yes | Database name. |
+| POSTGRES_HOST | No | Default localhost. |
+| POSTGRES_PORT | No | Default 5433. |
+| KAFKA_BOOTSTRAP | No | Kafka address. Default localhost:9092. |
+| KAFKA_TOPIC | No | Topic name. Default ecommerce-events. |
+
+## Simulated data
+
+| Event type | Share of events |
+|---|---|
+| page_view | 70% |
+| add_to_cart | 20% |
+| order | 10% |
+
+The generator simulates 500 users and 5 products. Orders are for 1 to 3 units.
+
+In one test run the producer sent 2,840 events. At one point the dashboard showed 966 events, 92 orders and 116,016.00 in revenue.
 
 ## Example queries
 
-<!-- TODO: after testing, list 5+ real questions and the answer theme you actually got. At least 2 documents. Example format:
-1. "What is ...?" -> expected theme: ... (source: file.pdf, page 4)
-2. ...
-6. Out-of-scope: "Who won the 2018 World Cup?" -> bot replies it couldn't find this in the documents
--->
+Run these against the database to check the data directly:
+
+~~~
+docker exec -it ecom_postgres psql -U ecom -d ecommerce -c "SELECT event_type, COUNT(*) FROM raw_events GROUP BY event_type;"
+~~~
+
+~~~
+docker exec -it ecom_postgres psql -U ecom -d ecommerce -c "SELECT * FROM revenue_per_minute ORDER BY minute DESC LIMIT 5;"
+~~~
+
+~~~
+docker exec -it ecom_postgres psql -U ecom -d ecommerce -c "SELECT product_id, SUM(amount) AS revenue, SUM(quantity) AS units FROM orders GROUP BY product_id ORDER BY revenue DESC;"
+~~~
+
+## Testing
+
+The 7 tests cover valid page views and orders, a missing field, an unknown event type, a zero quantity, a negative amount, and input that is not an object.
 
 ## Known limitations
 
-<!-- TODO: keep the ones you actually observed while testing. Likely ones: -->
-- Scanned/image-only PDFs have no extractable text (no OCR), so they can't be indexed.
-- Tables and multi-column layouts can extract in a jumbled order, which hurts retrieval.
-- Fixed similarity threshold: a good value for one set of documents may be too strict or too loose for another. Tune `MIN_SIMILARITY`.
-- Only top-k chunks are seen by the LLM, so questions that need information spread across many pages (e.g. "summarize the whole document") work poorly.
-- The embedding model is English-focused; other languages retrieve worse.
-- No re-ranking and no conversation memory: each question is answered independently.
-- Header/footer removal is heuristic (repeated lines) and can occasionally miss or over-remove text.
-- Requires internet for the Gemini call (embeddings and the vector DB are fully local).
+- The data is simulated. There is no real store behind the producer.
+- One Kafka partition and one consumer, so throughput is limited to what a single consumer can handle.
+- If an event fails to save because of a database error, the error is logged but the offset is still committed, so that event is not retried.
+- Invalid events are logged and skipped. They are not kept anywhere (no dead-letter topic), so they cannot be inspected later.
+- The dashboard re-queries PostgreSQL every 5 seconds. It is near real time, not a push stream.
+- Revenue has no currency. Amounts are plain numbers.
+- The producer, consumer and dashboard are not containerised yet. Only Kafka and PostgreSQL are.
+- Only the validation rules have unit tests. The Kafka and database code has no automated tests.
+- The demo database password is for local use only and should be changed for anything real.
+
+## Possible improvements
+
+- Dead-letter topic for invalid events, and retries for events that fail to save
+- Run the producer, consumer and dashboard as Docker services
+- Multiple Kafka partitions and consumers for higher throughput
+- Batch rollups with Airflow or dbt
+- Alerts when revenue per minute drops sharply
+
+## Author
+
+**R. Binny Hinn**
+Python and Data Engineering | AI and ML graduate (CSE, 2026)
+
+- GitHub: [github.com/binnyhinn](https://github.com/binnyhinn)
+- LinkedIn: [linkedin.com/in/binny-hinn-4303873ba](https://www.linkedin.com/in/binny-hinn-4303873ba)
+- Email: [binnyhinnr@gmail.com](mailto:binnyhinnr@gmail.com)
