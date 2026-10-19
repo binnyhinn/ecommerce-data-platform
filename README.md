@@ -167,38 +167,6 @@ The generator simulates 500 users and 5 products. Orders are for 1 to 3 units.
 
 In one test run the producer sent 2,840 events. At one point the dashboard showed 966 events, 92 orders and 116,016.00 in revenue.
 
-## Environment variables
-
-Create a `.env` file in the project root. It is in `.gitignore`, so it is never committed. The values below are for a local demo database only.
-
-~~~
-POSTGRES_USER=ecom
-POSTGRES_PASSWORD=ecom123
-POSTGRES_DB=ecommerce
-~~~
-
-| Variable | Required | Description |
-|---|---|---|
-| POSTGRES_USER | Yes | PostgreSQL user, also used by Docker Compose. |
-| POSTGRES_PASSWORD | Yes | PostgreSQL password, also used by Docker Compose. |
-| POSTGRES_DB | Yes | Database name. |
-| POSTGRES_HOST | No | Default localhost. |
-| POSTGRES_PORT | No | Default 5433. |
-| KAFKA_BOOTSTRAP | No | Kafka address. Default localhost:9092. |
-| KAFKA_TOPIC | No | Topic name. Default ecommerce-events. |
-
-## Simulated data
-
-| Event type | Share of events |
-|---|---|
-| page_view | 70% |
-| add_to_cart | 20% |
-| order | 10% |
-
-The generator simulates 500 users and 5 products. Orders are for 1 to 3 units.
-
-In one test run the producer sent 2,840 events. At one point the dashboard showed 966 events, 92 orders and 116,016.00 in revenue.
-
 ## Example queries
 
 Run these against the database to check the data directly:
@@ -241,7 +209,7 @@ The 7 tests cover valid page views and orders, a missing field, an unknown event
 
 ## Author
 
-**R. Binny Hinn**
+**R. Binny Hinn**  
 Python and Data Engineering | AI and ML graduate (CSE, 2026)
 
 - GitHub: [github.com/binnyhinn](https://github.com/binnyhinn)
